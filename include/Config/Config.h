@@ -5,6 +5,10 @@
 #include <Arduino.h>
 #include <SPI.h>
 
+// Use unique credentials for OTA; do not reuse MQTT credentials.
+#define OTA_USERNAME "admin"
+#define OTA_PASSWORD "admin"
+
 // ===================== PILIH JARINGAN =====================
 // Aktifkan salah satu saja
 // #define USE_WIFI

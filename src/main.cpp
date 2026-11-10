@@ -1,17 +1,18 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ArduinoOTA.h>
 #include <MQTT.h>
 
 #include "Config/Config.h"
 #include "LedManager.h"
 #include "NetworkManager.h"
+#include "OtaManager.h"
 #include "PowerMeter.h"
 
 NetworkManager network;
 LedManager ledManager;
 MQTTClient client(512);
 PowerMeter meter;
+OtaManager otaManager;
 
 unsigned long lastPublish = 0;
 int mqttFailCounter = 0;
@@ -122,86 +123,59 @@ void mqttCallback(String &topic, String &payload)
 
 void reconnectMQTT()
 {
-  while (!client.connected())
+  if (client.connected())
   {
-    Serial.print("[MQTT] Attempting connection...");
+    return;
+  }
 
-    bool ok = client.connect(
-        MQTT_CLIENT_ID,
-        MQTT_USERNAME,
-        MQTT_PASSWORD);
+  static unsigned long lastAttempt = 0;
+  const unsigned long now = millis();
+  if (now - lastAttempt < MQTT_RETRY_INTERVAL_MS)
+  {
+    return;
+  }
+  lastAttempt = now;
 
-    if (ok)
+  Serial.print("[MQTT] Attempting connection...");
+  const bool ok = client.connect(
+      MQTT_CLIENT_ID,
+      MQTT_USERNAME,
+      MQTT_PASSWORD);
+
+  if (ok)
+  {
+    Serial.println("connected");
+    mqttFailCounter = 0;
+
+    client.publish(MQTT_STATUS, LWT_ONLINE, true, 1);
+    publishNetworkData();
+
+    client.subscribe(MQTT_ELEC_RST_CMD);
+    client.subscribe(MQTT_ELEC_CMD);
+
+    Serial.println("[MQTT] Subscribed topics");
+  }
+  else
+  {
+    Serial.print("failed, error=");
+    Serial.print(client.lastError());
+    Serial.print(", returnCode=");
+    Serial.println(client.returnCode());
+
+    mqttFailCounter++;
+
+    if (mqttFailCounter >= MQTT_FAIL_RESTART_LIMIT)
     {
-      Serial.println("connected");
-      mqttFailCounter = 0;
-
-      client.publish(MQTT_STATUS, LWT_ONLINE, true, 1);
-      publishNetworkData();
-
-      client.subscribe(MQTT_ELEC_RST_CMD);
-      client.subscribe(MQTT_ELEC_CMD);
-
-      Serial.println("[MQTT] Subscribed topics");
-    }
-    else
-    {
-      Serial.print("failed, error=");
-      Serial.print(client.lastError());
-      Serial.print(", returnCode=");
-      Serial.println(client.returnCode());
-
-      mqttFailCounter++;
-
-      if (mqttFailCounter >= MQTT_FAIL_RESTART_LIMIT)
-      {
-        Serial.println("[MQTT] Too many failures, restarting ESP...");
-        ESP.restart();
-      }
-
-      delay(MQTT_RETRY_INTERVAL_MS);
+      Serial.println("[MQTT] Too many failures, restarting ESP...");
+      ESP.restart();
     }
   }
-}
-
-void setupOTA()
-{
-  ArduinoOTA.onStart([]() {
-    String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
-    Serial.println("[OTA] Start updating " + type);
-  });
-
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\n[OTA] End");
-  });
-
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
-  });
-
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("[OTA] Error[%u]: ", error);
-
-    if (error == OTA_AUTH_ERROR) {
-      Serial.println("Auth Failed");
-    } else if (error == OTA_BEGIN_ERROR) {
-      Serial.println("Begin Failed");
-    } else if (error == OTA_CONNECT_ERROR) {
-      Serial.println("Connect Failed");
-    } else if (error == OTA_RECEIVE_ERROR) {
-      Serial.println("Receive Failed");
-    } else if (error == OTA_END_ERROR) {
-      Serial.println("End Failed");
-    }
-  });
-
-  ArduinoOTA.begin();
-  Serial.println("[OTA] Ready");
 }
 
 void setup()
 {
   Serial.begin(115200);
+  otaManager.checkBootState();
 
   pinMode(MCB_1, INPUT);
   pinMode(LED_INDI, OUTPUT);
@@ -213,8 +187,7 @@ void setup()
 
   meter.begin();
   network.begin();
-
-  // setupOTA();
+  otaManager.begin();
 
   client.begin(MQTT_SERVER, MQTT_PORT, network.getClient());
   client.setWill(MQTT_STATUS, LWT_OFFLINE, true, 1); // Mengatur Last Will and Testament (LWT)
@@ -227,10 +200,9 @@ void setup()
 
 void loop()
 {
-  // ArduinoOTA.handle();
   network.loop();
   ledManager.loop();
-  network.loop();
+  otaManager.handleClient();
 
   if (!client.connected())
   {
@@ -247,4 +219,6 @@ void loop()
     publishNetworkData();
     lastPublish = now;
   }
+
+  otaManager.confirmBootIfReady();
 }
